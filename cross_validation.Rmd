@@ -1,0 +1,172 @@
+
+Load libraries and read in data, including demo covariates
+
+```{r}
+library(disaggregation)
+library(sf)
+library(terra)
+library(modelr) # splitting data
+library(tictoc) # measure timing
+library(Metrics) # evaluate results
+library(glue) # fstrings
+
+response <- st_read("mdg_shapes.shp")
+
+# ISO3 code for the response data
+country_code <- "MDG"
+
+aggregation <- rast("population.tif")
+cov_files <- c("Elevation.tif", "EVI.tif", "LSTmean.tif", "LSTsd.tif")
+
+covariates <- rast(lapply(cov_files, rast))
+```
+
+download or read in actual covariates
+
+```{r}
+if (!file.exists(glue("{country_code}_stack.tif"))){
+  access <- disagapp::cov_access(response, "Travel Time to Cities (2015)")
+  bioclim <- disagapp::cov_bioclim(country_code, c("Mean temperature", "Isothermality", "Total precipitation"), response)
+  worldpop <- disagapp::agg_worldpop(response, country_code, "Constrained", "1km", 2020)
+  
+  covariates <- append(bioclim, access)
+  names(covariates)[4] <- c("Travel time")
+  
+  covariates <- lapply(covariates, terra::resample, covariates$`Mean temperature`)
+  worldpop <- terra::resample(worldpop, covariates$`Mean temperature`, method = "sum")
+  
+  covariates <- append(covariates, worldpop)
+  names(covariates)[5] <- c("Worldpop")
+  
+  writeRaster(rast(covariates), glue("{country_code}_stack.tif"))
+} else {
+  covariates <- rast(glue("{country_code}_stack.tif"))
+}
+
+
+aggregation <- covariates$Worldpop
+covariates$Worldpop <- NULL
+
+covariates <- terra::aggregate(covariates, fact = 2, fun = "mean")
+aggregation <- terra::aggregate(aggregation, fact = 2, fun = "sum")
+
+covariates <- terra::scale(covariates)
+
+plot(covariates)
+```
+
+
+ and plot them, 
+
+Fit models to each dataset
+
+```{r}
+
+tic("start")
+
+
+# extract averages for polygons for use in linear models
+cov_polys <- extract(covariates, response, fun = "mean")
+agg_polys <- extract(aggregation, response, fun = "sum")
+
+out <- data.frame()
+lm_out <- data.frame()
+
+n_groups <- 5
+n_reps <- 5
+start_seed <- 123
+
+for (r in 1:n_reps){
+
+  set.seed(start_seed * r)
+  
+  # Split data into 5 training / testing datasets
+  cv  <- crossv_kfold(response, k = n_groups)
+  
+  for (n in 1:n_groups){
+    
+    set.seed((start_seed * r)  + n)
+    
+    train <- cv$train[[n]]$data[cv$train[[n]]$idx,]
+  
+    cov_train <- crop(covariates, train, mask = TRUE)
+    agg_train <- crop(aggregation, train, mask = TRUE)
+  
+    prep <- prepare_data(train, cov_train, agg_train, id_var = "ID_2", response_var = "inc", na_action = TRUE, make_mesh = TRUE)
+    fit <- disag_model(prep, family = "poisson", link = "log")
+    pred <- predict_model(fit, predict_iid = TRUE, new_data = covariates)
+    cases <- pred$prediction * aggregation
+    agg_cases <- extract(cases, response, fun = "sum")
+    agg_cases$rep <- r
+  
+    test_index <- cv$test[[n]]$idx
+    test_result <- agg_cases[test_index,]
+    out <- rbind(out, test_result)
+  
+    saveRDS(fit, glue("{country_code}_r{r}_n{n}_model.rds"))
+    
+    # fit linear model to average polygon values
+  
+    lm_train <- cbind(cov_polys[cv$train[[n]]$idx,], agg_polys[cv$train[[n]]$idx,], response$inc[cv$train[[n]]$idx])
+    names(lm_train)[8] <- "response"
+    lmod <- lm(response ~ population * LSTmean * LSTsd * EVI * Elevation, data = lm_train)
+    lm_test <- cbind(cov_polys[cv$test[[n]]$idx,], agg_polys[cv$test[[n]]$idx,], response$inc[cv$test[[n]]$idx])
+    lm_test_result <- cbind(predict(lmod, lm_test), cv$test[[n]]$idx, r)
+    lm_out <- rbind(lm_out, lm_test_result)
+    
+  }
+}
+toc()
+
+
+
+
+```
+
+Merge predictions with response data and plot comparison
+
+```{r}
+
+response$ID <- 1:nrow(response)
+rmse <- NULL
+mae <- NULL
+
+for (r in 1:n_reps){
+  results <- as.data.frame(merge(response, out[out$rep == r,], by = "ID"))
+  results <- results[complete.cases(results[,c("inc", "sum")]),]
+  
+  rmse[r] <- Metrics::rmse(results$inc, results$sum)
+  mae[r] <- mean(abs(results$inc - results$sum))
+  
+  plot(results$inc, results$sum, xlab = "Observed", ylab = "Predicted")
+  abline(0, 1, col = "red")
+  legend("topleft", legend = c(glue::glue("MAE = {round(mae[r])}\n", glue::glue("RMSE = {round(rmse[r])}"))))
+  
+  names(lm_out) <- c("sum", "ID", "rep")
+  
+  lm_results <- as.data.frame(merge(response, lm_out, by = "ID"))
+  lm_results <- lm_results[complete.cases(lm_results[,c("inc", "sum")]),]
+  
+  lm_rmse <- Metrics::rmse(lm_results$inc, lm_results$sum)
+  lm_mae <- mean(abs(lm_results$inc - lm_results$sum))
+  
+  plot(lm_results$inc, lm_results$sum, xlab = "Observed", ylab = "Predicted")
+  abline(0, 1, col = "red")
+  legend("topleft", legend = c(glue::glue("MAE = {round(lm_mae)}\n", glue::glue("RMSE = {round(lm_rmse)}"))))
+}
+
+hist(mae[1:n_reps])
+hist(rmse[1:n_reps])
+
+results <- as.data.frame(merge(response, out, by = "ID"))
+results <- results[complete.cases(results[,c("inc", "sum")]),]
+
+rmse[n_reps + 1] <- Metrics::rmse(results$inc, results$sum)
+mae[n_reps + 1] <- mean(abs(results$inc - results$sum))
+
+plot(results$inc, results$sum, xlab = "Observed", ylab = "Predicted")
+abline(0, 1, col = "red")
+legend("topleft", legend = c(glue::glue("MAE = {round(mae[n_reps + 1])}\n", glue::glue("RMSE = {round(rmse[n_reps + 1])}"))))
+  
+```
+

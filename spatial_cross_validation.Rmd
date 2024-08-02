@@ -1,0 +1,95 @@
+
+Load libraries and read in data
+
+```{r}
+library(disaggregation)
+library(sf)
+library(terra)
+library(spatialsample) # splitting data
+library(tictoc) # measure timing
+library(Metrics) # evaluate results
+
+response <- st_read("mdg_shapes.shp")
+
+aggregation <- rast("population.tif")
+
+cov_files <- c("Elevation.tif", "EVI.tif", "LSTmean.tif", "LSTsd.tif")
+
+covariates <- rast(lapply(cov_files, rast))
+```
+
+Split data into 5 training / testing datasets and plot them
+
+```{r}
+n_groups <- 5
+
+start_seed <- 123
+
+set.seed(start_seed)
+
+centroids <- st_centroid(response)
+clusters <- kmeans(st_coordinates(centroids), 5)
+
+clusters_2 <- spatial_clustering_cv(response, v = 5)
+
+for (n in 1:n_groups){
+  plot(response[clusters$cluster != n,]["inc"])
+  plot(response[clusters_2$splits[[n]]$in_id,]["inc"])
+}
+
+```
+
+Fit models to each dataset
+
+```{r}
+
+tic("start")
+
+out <- data.frame()
+
+for (n in 1:n_groups){
+# for (n in 1:1){
+  
+  set.seed(start_seed + n)
+  
+  train <- response[clusters_2$splits[[n]]$in_id,]
+  
+  cov_train <- crop(covariates, train, mask = TRUE)
+  agg_train <- crop(aggregation, train, mask = TRUE)
+  
+  prep <- prepare_data(train, covariates, aggregation, id_var = "ID_2", response_var = "inc", na_action = TRUE, make_mesh = TRUE)
+  fit <- disag_model(prep, family = "poisson", link = "log")
+  pred <- predict_model(fit, predict_iid = TRUE, newdata = covariates)
+  cases <- pred$prediction * aggregation
+  agg_cases <- extract(cases, response, fun = "sum")
+  
+  test_index <- (1:nrow(response))[!(1:nrow(response) %in% clusters_2$splits[[n]]$in_id)]
+  test_result <- agg_cases[test_index,]
+  out <- rbind(out, test_result)
+  
+  saveRDS(fit, paste0("model_", n, ".rds"))
+  
+}
+
+toc()
+
+
+```
+
+Merge predictions with response data and plot comparison
+
+```{r}
+
+response$ID <- 1:nrow(response)
+results <- as.data.frame(merge(response, out, by = "ID"))
+results <- results[complete.cases(results[,c("inc", "sum")]),]
+
+plot(results$inc, results$sum, xlab = "Observed", ylab = "Predicted")
+abline(0, 1, col = "red")
+
+rmse <- Metrics::rmse(results$inc, results$sum)
+mae <- mean(abs(results$inc - results$sum))
+
+
+```
+
