@@ -11,6 +11,9 @@ library(Metrics) # evaluate results
 
 response <- st_read("mdg_shapes.shp")
 
+# ISO3 code for the response data
+country_code <- "MDG"
+
 aggregation <- rast("population.tif")
 
 cov_files <- c("Elevation.tif", "EVI.tif", "LSTmean.tif", "LSTsd.tif")
@@ -18,7 +21,43 @@ cov_files <- c("Elevation.tif", "EVI.tif", "LSTmean.tif", "LSTsd.tif")
 covariates <- rast(lapply(cov_files, rast))
 ```
 
-Split data into 5 training / testing datasets and plot them
+
+download or read in actual covariates
+
+```{r}
+if (!file.exists(glue("{country_code}_stack.tif"))){
+  access <- disagapp::cov_access(response, "Travel Time to Cities (2015)")
+  bioclim <- disagapp::cov_bioclim(country_code, c("Mean temperature", "Isothermality", "Total precipitation"), response)
+  worldpop <- disagapp::agg_worldpop(response, country_code, "Constrained", "1km", 2020)
+  
+  covariates <- append(bioclim, access)
+  names(covariates)[4] <- c("Travel time")
+  
+  covariates <- lapply(covariates, terra::resample, covariates$`Mean temperature`)
+  worldpop <- terra::resample(worldpop, covariates$`Mean temperature`, method = "sum")
+  
+  covariates <- append(covariates, worldpop)
+  names(covariates)[5] <- c("Worldpop")
+  
+  writeRaster(rast(covariates), glue("{country_code}_stack.tif"))
+} else {
+  covariates <- rast(glue("{country_code}_stack.tif"))
+}
+
+
+aggregation <- covariates$Worldpop
+covariates$Worldpop <- NULL
+
+covariates <- terra::aggregate(covariates, fact = 2, fun = "mean")
+aggregation <- terra::aggregate(aggregation, fact = 2, fun = "sum")
+
+covariates <- terra::scale(covariates)
+
+plot(covariates)
+```
+
+
+Split data into 5 training / testing datasets and plot them. Using two different methods at the moment, but going with the second.
 
 ```{r}
 n_groups <- 5
@@ -28,9 +67,9 @@ start_seed <- 123
 set.seed(start_seed)
 
 centroids <- st_centroid(response)
-clusters <- kmeans(st_coordinates(centroids), 5)
+clusters <- kmeans(st_coordinates(centroids), n_groups)
 
-clusters_2 <- spatial_clustering_cv(response, v = 5)
+clusters_2 <- spatial_clustering_cv(response, v = n_groups)
 
 for (n in 1:n_groups){
   plot(response[clusters$cluster != n,]["inc"])
@@ -47,6 +86,9 @@ tic("start")
 
 out <- data.frame()
 
+#currently just generate one mesh for all the models to avoid being unable to predict outside
+mesh <- build_mesh(response)
+
 for (n in 1:n_groups){
 # for (n in 1:1){
   
@@ -57,22 +99,27 @@ for (n in 1:n_groups){
   cov_train <- crop(covariates, train, mask = TRUE)
   agg_train <- crop(aggregation, train, mask = TRUE)
   
-  prep <- prepare_data(train, covariates, aggregation, id_var = "ID_2", response_var = "inc", na_action = TRUE, make_mesh = TRUE)
+  prep <- prepare_data(train, cov_train, agg_train, id_var = "ID_2", response_var = "inc", na_action = TRUE, make_mesh = FALSE)
+  prep$mesh <- mesh
   fit <- disag_model(prep, family = "poisson", link = "log")
-  pred <- predict_model(fit, predict_iid = TRUE, newdata = covariates)
+  pred <- predict_model(fit, predict_iid = TRUE, new_data = covariates)
+  uncertain <- predict_uncertainty(fit, new_data = covariates, predict_iid = TRUE, CI = 0.8)
   cases <- pred$prediction * aggregation
-  agg_cases <- extract(cases, response, fun = "sum")
+  lower_cases <- uncertain$predictions_ci$`lower CI` * aggregation
+  upper_cases <- uncertain$predictions_ci$`upper CI` * aggregation
+  agg_cases <- cbind(extract(lower_cases, response, fun = "sum", ID = FALSE), 
+                     extract(cases, response, fun = "sum"), 
+                     extract(upper_cases, response, fun = "sum"), ID = FALSE)
   
   test_index <- (1:nrow(response))[!(1:nrow(response) %in% clusters_2$splits[[n]]$in_id)]
   test_result <- agg_cases[test_index,]
   out <- rbind(out, test_result)
   
-  saveRDS(fit, paste0("model_", n, ".rds"))
+  saveRDS(fit, glue("{country_code}_n{n}_spatialcv_model.rds"))
   
 }
 
 toc()
-
 
 ```
 
@@ -84,12 +131,14 @@ response$ID <- 1:nrow(response)
 results <- as.data.frame(merge(response, out, by = "ID"))
 results <- results[complete.cases(results[,c("inc", "sum")]),]
 
-plot(results$inc, results$sum, xlab = "Observed", ylab = "Predicted")
-abline(0, 1, col = "red")
-
 rmse <- Metrics::rmse(results$inc, results$sum)
 mae <- mean(abs(results$inc - results$sum))
+coverage <- length(results$inc[results$inc >= results$`lower CI` & results$inc <= results$`upper CI`]) / nrow(response) * 100
 
-
+plot(results$inc, results$sum, xlab = "Observed", ylab = "Predicted")
+abline(0, 1, col = "red")
+legend("topleft", legend = c(glue::glue("MAE = {round(mae)}"), 
+                             glue::glue("RMSE = {round(rmse)}"),
+                             glue::glue("Coverage (@80%) = {round(coverage)} % ")))
 ```
 
