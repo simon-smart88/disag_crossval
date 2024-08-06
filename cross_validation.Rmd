@@ -56,14 +56,11 @@ plot(covariates)
 ```
 
 
- and plot them, 
-
 Fit models to each dataset
 
 ```{r}
 
 tic("start")
-
 
 # extract averages for polygons for use in linear models
 cov_polys <- extract(covariates, response, fun = "mean")
@@ -108,8 +105,10 @@ for (r in 1:n_reps){
     # fit linear model to average polygon values
   
     lm_train <- cbind(cov_polys[cv$train[[n]]$idx,], agg_polys[cv$train[[n]]$idx,], response$inc[cv$train[[n]]$idx])
-    names(lm_train)[8] <- "response"
-    lmod <- lm(response ~ population * LSTmean * LSTsd * EVI * Elevation, data = lm_train)
+    names(lm_train)[ncol(lm_train)] <- "response"
+    variables <- paste(c(names(covariates), names(aggregation)), collapse = " * ")
+    fm <- reformulate(variables, "response")
+    lmod <- lm(fm, data = lm_train)
     lm_test <- cbind(cov_polys[cv$test[[n]]$idx,], agg_polys[cv$test[[n]]$idx,], response$inc[cv$test[[n]]$idx])
     lm_test_result <- cbind(predict(lmod, lm_test), cv$test[[n]]$idx, r)
     lm_out <- rbind(lm_out, lm_test_result)
