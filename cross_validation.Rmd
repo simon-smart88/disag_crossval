@@ -52,6 +52,8 @@ aggregation <- terra::aggregate(aggregation, fact = 2, fun = "sum")
 
 covariates <- terra::scale(covariates)
 
+names(covariates) <- gsub(" ", "_", names(covariates))
+
 plot(covariates)
 ```
 
@@ -122,9 +124,6 @@ for (r in 1:n_reps){
   }
 }
 toc()
-
-
-
 
 ```
 
