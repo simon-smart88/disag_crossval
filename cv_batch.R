@@ -50,9 +50,9 @@ uncertain <- predict_uncertainty(fit, new_data = covariates, predict_iid = TRUE,
 cases <- pred$prediction * aggregation
 lower_cases <- uncertain$predictions_ci$`lower CI` * aggregation
 upper_cases <- uncertain$predictions_ci$`upper CI` * aggregation
-agg_cases <- cbind(extract(lower_cases, response, fun = "sum", ID = FALSE), 
-                   extract(cases, response, fun = "sum"), 
-                   extract(upper_cases, response, fun = "sum", ID = FALSE))
+agg_cases <- cbind(extract(lower_cases, response, fun = "sum", ID = FALSE, na.rm = TRUE), 
+                   extract(cases, response, fun = "sum", na.rm = TRUE), 
+                   extract(upper_cases, response, fun = "sum", ID = FALSE, na.rm = TRUE))
 agg_cases$rep <- r
 
 test_index <- cv$test[[n]]$idx
