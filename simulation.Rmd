@@ -1,0 +1,119 @@
+```{r}
+library(disaggregation)
+library(sf)
+library(terra)
+library(modelr) # splitting data
+library(tictoc) # measure timing
+library(Metrics) # evaluate results
+library(glue) # fstrings
+
+response <- st_read("mdg_shapes.shp")
+
+# ISO3 code for the response data
+country_code <- "MDG"
+
+aggregation <- rast("population.tif")
+cov_files <- c("Elevation.tif", "EVI.tif", "LSTmean.tif", "LSTsd.tif")
+
+covariates <- rast(lapply(cov_files, rast))
+```
+
+
+```{r}
+if (!file.exists(glue("{country_code}_stack.tif"))){
+  access <- disagapp::cov_access(response, "Travel Time to Cities (2015)")
+  bioclim <- disagapp::cov_bioclim(country_code, c("Mean temperature", "Isothermality", "Total precipitation"), response)
+  worldpop <- disagapp::agg_worldpop(response, country_code, "Constrained", "1km", 2020)
+  
+  covariates <- append(bioclim, access)
+  names(covariates)[4] <- c("Travel time")
+  
+  covariates <- lapply(covariates, terra::resample, covariates$`Mean temperature`)
+  worldpop <- terra::resample(worldpop, covariates$`Mean temperature`, method = "sum")
+  
+  covariates <- append(covariates, worldpop)
+  names(covariates)[5] <- c("Worldpop")
+  
+  writeRaster(rast(covariates), glue("{country_code}_stack.tif"))
+} else {
+  covariates <- rast(glue("{country_code}_stack.tif"))
+}
+
+
+aggregation <- covariates$Worldpop
+covariates$Worldpop <- NULL
+
+covariates <- terra::aggregate(covariates, fact = 2, fun = "mean")
+aggregation <- terra::aggregate(aggregation, fact = 2, fun = "sum")
+
+names(covariates) <- gsub(" ", "_", names(covariates))
+
+plot(covariates)
+```
+Generate simulated response data from covariates
+
+```{r}
+# 
+# simulated <- (aggregation / 100) * 
+#             (covariates$Mean_temperature / 10) * 
+#             (covariates$Isothermality / 100) * 
+#             (covariates$Total_precipitation / 1000) *
+#             (covariates$Travel_time / 1000)
+
+simulated <- (aggregation / 10000) * 
+            ((covariates$Mean_temperature * 5) + 
+            (covariates$Isothermality * 3) +
+            (covariates$Total_precipitation * 0.05) +
+            (covariates$Travel_time * 0.05))
+
+plot(simulated)
+
+sim_poly <- terra::extract(simulated, response, ID = FALSE, fun = "sum", na.rm = TRUE)
+
+hist(sim_poly$Worldpop)
+sum(sim_poly$Worldpop)
+
+response$inc <- sim_poly$Worldpop
+
+plot(response["inc"])
+```
+
+Fit the model
+
+```{r}
+covariates <- terra::scale(covariates)
+
+prep <- prepare_data(response, covariates, aggregation, id_var = "ID_2", response_var = "inc", na_action = TRUE, make_mesh = TRUE)
+fit <- disag_model(prep, family = "poisson", link = "log")
+pred <- predict_model(fit, predict_iid = TRUE)
+# generate prediction intervals at 80 % credible interval
+uncertain <- predict_uncertainty(fit, predict_iid = TRUE, CI = 0.8)
+cases <- pred$prediction * aggregation
+lower_cases <- uncertain$predictions_ci$`lower CI` * aggregation
+upper_cases <- uncertain$predictions_ci$`upper CI` * aggregation
+
+plot(fit)
+```
+
+
+```{r}
+results <- data.frame(values(simulated), values(lower_cases), values(cases), values(upper_cases))
+results <- results[complete.cases(results),]
+names(results) <- c("observed", "predicted", "lower_ci", "upper_ci")
+
+rmse <- Metrics::rmse(results$observed, results$predicted)
+mae <- mean(abs(results$observed - results$predicted))
+
+coverage <- length(results$observed[results$observed >= results$lower_ci & results$observed <= results$upper_ci]) / nrow(results) * 100
+
+plot(values(simulated), values(cases), xlab = "Observed", ylab = "Predicted")
+abline(0, 1, col = "red")
+legend("topleft", legend = c(glue::glue("MAE = {round(mae, 2)}"), 
+                             glue::glue("RMSE = {round(rmse, 2)}")
+                             ))
+
+plot(results$observed, results$predicted)
+points(results$observed, results$lower_ci, col="blue")
+points(results$observed, results$upper_ci, col="red")
+```
+
