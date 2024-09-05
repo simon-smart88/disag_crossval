@@ -27,22 +27,22 @@ start_seed <- 123
 task_id <- as.numeric(Sys.getenv("SLURM_ARRAY_TASK_ID"))
 
 # Convert task_id to loop indices
-r <- ((task_id - 1) %/% n_reps) + 1  # Outer loop index (1 to 5)
+r <- ((task_id - 1) %% n_groups) + 1   # Outer loop index (1 to 5)
 
 set.seed(start_seed * r)
 
 for (n in 1:n_groups){
-    
+
   # Split data into 5 training / testing datasets
   cv  <- crossv_kfold(response, k = n_groups)
-    
+
   set.seed((start_seed * r)  + n)
-  
+
   train <- cv$train[[n]]$data[cv$train[[n]]$idx,]
-  
+
   cov_train <- crop(covariates, train, mask = TRUE)
   agg_train <- crop(aggregation, train, mask = TRUE)
-  
+
   prep <- prepare_data(train, cov_train, agg_train, id_var = "ID_2", response_var = "inc", na_action = TRUE, make_mesh = TRUE)
   fit <- disag_model(prep, family = "poisson", link = "log")
   pred <- predict_model(fit, predict_iid = TRUE, new_data = covariates)
@@ -51,14 +51,14 @@ for (n in 1:n_groups){
   cases <- pred$prediction * aggregation
   lower_cases <- uncertain$predictions_ci$`lower CI` * aggregation
   upper_cases <- uncertain$predictions_ci$`upper CI` * aggregation
-  agg_cases <- cbind(extract(lower_cases, response, fun = "sum", ID = FALSE, na.rm = TRUE), 
-                     extract(cases, response, fun = "sum", na.rm = TRUE), 
+  agg_cases <- cbind(extract(lower_cases, response, fun = "sum", ID = FALSE, na.rm = TRUE),
+                     extract(cases, response, fun = "sum", na.rm = TRUE),
                      extract(upper_cases, response, fun = "sum", ID = FALSE, na.rm = TRUE))
   agg_cases$rep <- r
-  
+
   test_index <- cv$test[[n]]$idx
   test_result <- agg_cases[test_index,]
-  
+
   saveRDS(fit, glue("{country_code}_r{r}_n{n}_model.rds"))
   write.csv(test_result, glue("{country_code}_r{r}_n{n}_results.csv"))
 }
