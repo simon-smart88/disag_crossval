@@ -5,7 +5,7 @@ country_code <- "MDG"
 
 out <- data.frame()
 
-result_files <- list.files(path = "~/crossval",
+result_files <- list.files(path = "~/disag_crossval",
                            pattern = glue("^{country_code}.*results\\.csv$"),
                            full.names = TRUE)
 
