@@ -31,10 +31,10 @@ r <- ((task_id - 1) %% n_groups) + 1   # Outer loop index (1 to 5)
 
 set.seed(start_seed * r)
 
-for (n in 1:n_groups){
+# Split data into 5 training / testing datasets
+cv  <- crossv_kfold(response, k = n_groups)
 
-  # Split data into 5 training / testing datasets
-  cv  <- crossv_kfold(response, k = n_groups)
+for (n in 1:n_groups){
 
   set.seed((start_seed * r)  + n)
 
@@ -59,6 +59,7 @@ for (n in 1:n_groups){
   test_index <- cv$test[[n]]$idx
   test_result <- agg_cases[test_index,]
 
+  fit$data$covariate_rasters <- wrap(fit$data$covariate_rasters)
   saveRDS(fit, glue("{country_code}_r{r}_n{n}_model.rds"))
   write.csv(test_result, glue("{country_code}_r{r}_n{n}_results.csv"))
 }
